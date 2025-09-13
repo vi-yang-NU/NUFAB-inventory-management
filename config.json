@@ -5,14 +5,17 @@
   "username": "vye8443",
   "password": "Vinnie@123@4",
 
-
   "timeout_ms": 30000,
   "headless": true,
-  "debug_dump": true,
-
   "wait_for_duo_seconds": 120,
 
   "storage_state_path": "/app/storage_state.json",
   "use_storage_state": false,
-  "persist_storage_state_after_login": true
+  "persist_storage_state_after_login": true,
+
+  "debug_dump": true,
+  "save_screenshot": true,
+
+  "download_csv": false,
+  "csv_out_path": "/app/out/orders.csv"
 }

@@ -30,10 +30,10 @@ def index():
     return render_template("index.html", orders=list(orders.values()), statuses=ALLOWED_STATUSES)
 
 @app.post("/import")
-async def import_orders():
-    """Scrape NUcore and store NEW orders locally."""
+def import_orders():
+    """Scrape NUcore and store NEW orders locally (sync wrapper around async)."""
     cfg = load_config()
-    new_orders = await fetch_new_orders(cfg)
+    new_orders = asyncio.run(fetch_new_orders(cfg))
     data: Dict[str, dict] = {}
     for row in new_orders:
         key = as_key(str(row["order"]), str(row["order_detail"]))

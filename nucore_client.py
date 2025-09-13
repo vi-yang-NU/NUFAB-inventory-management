@@ -7,27 +7,29 @@ from playwright.async_api import async_playwright, TimeoutError as PWTimeoutErro
 
 CONFIG_PATH = Path("/app/config.json")  # mounted at runtime
 
-# ---------- config ----------
+# ---------- utils ----------
 def load_config() -> Dict:
     if not CONFIG_PATH.exists():
-        print("ERROR: /app/config.json not found. Mount it: -v $PWD/config.json:/app/config.json:ro", file=sys.stderr)
+        print("ERROR: /app/config.json not found. Mount it with -v $PWD/config.json:/app/config.json:ro", file=sys.stderr)
         sys.exit(1)
     try:
-        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        with open(CONFIG_PATH, "r") as f:
+            return json.load(f)
     except Exception as e:
         print(f"ERROR: failed to read config.json: {e}", file=sys.stderr)
         sys.exit(1)
 
-# ---------- helpers ----------
 async def dump_debug(page, label):
     out = Path("/app/out"); out.mkdir(parents=True, exist_ok=True)
     try:
         await page.screenshot(path=str(out / f"{label}.png"), full_page=True)
-    except Exception: pass
+    except Exception as e:
+        print(f"[debug] screenshot failed: {e}", file=sys.stderr)
     try:
         (out / f"{label}.url.txt").write_text(page.url, encoding="utf-8")
         (out / f"{label}.html").write_text(await page.content(), encoding="utf-8")
-    except Exception: pass
+    except Exception as e:
+        print(f"[debug] html dump failed: {e}", file=sys.stderr)
 
 async def first_visible_selector(page, candidates, timeout_ms):
     for sel in candidates:
@@ -38,6 +40,7 @@ async def first_visible_selector(page, candidates, timeout_ms):
             continue
     return None
 
+# ---------- IDP / login helpers ----------
 async def try_click_sso_entry(page, timeout_ms):
     SSO_CANDIDATES = [
         'a:has-text("NetID")', 'button:has-text("NetID")',
@@ -57,31 +60,32 @@ async def try_click_sso_entry(page, timeout_ms):
 
 async def microsoft_aad_login(page, username, password, timeout_ms):
     try:
-        # username/email
         if await page.locator('input[name="loginfmt"], #i0116').first.is_visible():
             await page.fill('input[name="loginfmt"], #i0116', username)
             await page.locator('#idSIButton9').click()
         else:
-            return False
-        # password
+            return False  # not AAD
+
         await page.locator('input[name="passwd"], #i0118').wait_for(state="visible", timeout=timeout_ms)
         await page.fill('input[name="passwd"], #i0118', password)
         await page.locator('#idSIButton9').click()
-        # stay signed in?
+
         try:
             await page.locator('#idBtn_Back, #idSIButton9').first.wait_for(timeout=8000)
             if await page.locator('#idBtn_Back').is_visible():
-                await page.locator('#idBtn_Back').click()
+                await page.locator('#idBtn_Back').click()  # "No"
             else:
-                await page.locator('#idSIButton9').click()
+                await page.locator('#idSIButton9').click()  # "Yes"
         except Exception:
             pass
+
         try:
             await page.wait_for_load_state("networkidle", timeout=timeout_ms)
         except PWTimeoutError:
             pass
         return True
-    except Exception:
+    except Exception as e:
+        print(f"[warn] AAD flow error: {e}", file=sys.stderr)
         return False
 
 async def generic_username_password_login(page, username, password, timeout_ms):
@@ -123,8 +127,8 @@ async def handle_duo_iframe_if_present(page, wait_seconds):
     try:
         await page.frame_locator("iframe#duo_iframe, iframe[name='duo_iframe']").first.wait_for(timeout=5000)
     except Exception:
-        return
-    # try to click push inside the frame (best-effort)
+        return  # no Duo
+    print(f"Detected Duo iframe — waiting up to {wait_seconds}s for approval…", file=sys.stderr)
     try:
         f = next((fr for fr in page.frames if (fr.name and 'duo' in fr.name.lower()) or ('duo' in (fr.url or '').lower())), None)
         if f:
@@ -140,7 +144,6 @@ async def handle_duo_iframe_if_present(page, wait_seconds):
                     continue
     except Exception:
         pass
-    # wait for duo to go away or proceed
     try:
         await page.wait_for_function(
             "() => !document.querySelector('iframe#duo_iframe, iframe[name=duo_iframe]')",
@@ -149,8 +152,8 @@ async def handle_duo_iframe_if_present(page, wait_seconds):
     except PWTimeoutError:
         pass
 
-# ---------- scrape ----------
-async def fetch_new_orders(cfg) -> List[Dict]:
+# ---------- open Orders page ----------
+async def login_and_open_orders(cfg):
     login_url   = cfg.get("login_url", "https://nucore.northwestern.edu/users/sign_in")
     target_url  = cfg.get("target_url", "https://nucore.northwestern.edu/facilities/nufab/orders")
     username    = cfg.get("username", "")
@@ -158,61 +161,107 @@ async def fetch_new_orders(cfg) -> List[Dict]:
     timeout_ms  = int(cfg.get("timeout_ms", 30000))
     headless    = bool(cfg.get("headless", True))
     wait_for_duo_seconds = int(cfg.get("wait_for_duo_seconds", 120))
+    storage_path = cfg.get("storage_state_path", "/app/storage_state.json")
+    use_storage  = bool(cfg.get("use_storage_state", False))
+    persist_storage_after_login = bool(cfg.get("persist_storage_state_after_login", True))
 
     if not username or not password:
-        print("ERROR: missing username/password in config.json", file=sys.stderr)
-        return []
+        print("ERROR: Missing 'username' or 'password' in config.json", file=sys.stderr)
+        raise RuntimeError("Missing credentials")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
-        context = await browser.new_context(viewport={"width": 1366, "height": 850})
+        storage_state_arg = storage_path if (use_storage and Path(storage_path).exists()) else None
+        context = await browser.new_context(
+            viewport={"width": 1366, "height": 850},
+            storage_state=storage_state_arg
+        )
         page = await context.new_page()
         page.set_default_timeout(timeout_ms)
 
-        # Start login
-        await page.goto(login_url, wait_until="domcontentloaded")
-        await try_click_sso_entry(page, timeout_ms)
+        # If cookies exist, try target directly
+        if storage_state_arg:
+            await page.goto(target_url, wait_until="domcontentloaded")
+            try:
+                await page.wait_for_load_state("networkidle", timeout=timeout_ms)
+            except PWTimeoutError:
+                pass
 
-        # Microsoft AAD?
-        if "login.microsoftonline.com" in page.url:
-            await microsoft_aad_login(page, username, password, timeout_ms)
-        else:
-            gen_ok = await generic_username_password_login(page, username, password, timeout_ms)
-            if not gen_ok:
-                await dump_debug(page, "login_no_fields")
-                print("WARN: could not find login fields; proceeding anyway.", file=sys.stderr)
+        # If not authenticated, go through login
+        if "users/sign_in" in page.url or page.url == "about:blank":
+            await page.goto(login_url, wait_until="domcontentloaded")
+            await try_click_sso_entry(page, timeout_ms)
 
-        await handle_duo_iframe_if_present(page, wait_seconds=wait_for_duo_seconds)
+            aad_done = False
+            if "login.microsoftonline.com" in page.url:
+                aad_done = await microsoft_aad_login(page, username, password, timeout_ms)
 
-        # Go to orders page
+            if not aad_done:
+                gen_ok = await generic_username_password_login(page, username, password, timeout_ms)
+                if not gen_ok:
+                    await dump_debug(page, "login_no_fields")
+                    print("WARN: could not find login fields; continuing.", file=sys.stderr)
+
+            await handle_duo_iframe_if_present(page, wait_seconds=wait_for_duo_seconds)
+
+        # Force Orders navigation
         await page.goto(target_url, wait_until="domcontentloaded")
         try:
             await page.wait_for_load_state("networkidle", timeout=timeout_ms)
         except PWTimeoutError:
             pass
 
-        # Find the first table whose headers include required names
+        # If still not on Orders, try clicking nav
+        if "facilities/nufab/orders" not in page.url:
+            nav_sel = await first_visible_selector(page, [
+                'a:has-text("Orders")',
+                'a[href*="/facilities/nufab/orders"]',
+                'a[href$="/orders"]'
+            ], timeout_ms=3000)
+            if nav_sel:
+                await page.locator(nav_sel).first.click()
+                try:
+                    await page.wait_for_load_state("networkidle", timeout=timeout_ms)
+                except PWTimeoutError:
+                    pass
+
+        # Always dump the result so you can verify
+        await dump_debug(page, "after_orders")
+
+        # Persist storage for next time
+        if persist_storage_after_login and storage_path:
+            try:
+                await context.storage_state(path=storage_path)
+            except Exception as e:
+                print(f"[warn] could not save storage_state: {e}", file=sys.stderr)
+
+        return browser, context, page
+
+# ---------- parse Orders table ----------
+async def fetch_new_orders(cfg) -> List[Dict]:
+    browser = context = page = None
+    try:
+        browser, context, page = await login_and_open_orders(cfg)
+
+        # Identify orders table by headers
         table_count = await page.locator("table").count()
-        target_table_idx = None
+        header_map = {}
+        target_idx = None
         wanted_headers = ["order", "order detail", "product", "status"]
 
         for i in range(table_count):
             ths = await page.locator(f"table:nth-of-type({i+1}) thead tr th").all_inner_texts()
             hdrs = [h.strip().lower() for h in ths]
-            if all(any(w in h for h in hdrs) for w in ["order", "product"]):
-                # more strict: must have order detail & status too
-                if all(any(w in h for h in hdrs) for w in wanted_headers):
-                    target_table_idx = i + 1
-                    header_map = {h.strip().lower(): idx for idx, h in enumerate(ths)}
-                    break
+            if all(any(w in h for h in hdrs) for w in wanted_headers):
+                target_idx = i + 1
+                header_map = {h.strip().lower(): idx for idx, h in enumerate(ths)}
+                break
 
-        if target_table_idx is None:
+        if target_idx is None:
             await dump_debug(page, "orders_table_not_found")
             print("ERROR: couldn't find orders table.", file=sys.stderr)
-            await context.close(); await browser.close()
             return []
 
-        # helper to get column index by name (allow partial match)
         def col_idx(name: str) -> Optional[int]:
             lname = name.lower()
             for k, idx in header_map.items():
@@ -224,21 +273,24 @@ async def fetch_new_orders(cfg) -> List[Dict]:
         idx_order_detail = col_idx("order detail")
         idx_product = col_idx("product")
         idx_status = col_idx("status")
+        if None in (idx_order, idx_order_detail, idx_product, idx_status):
+            await dump_debug(page, "orders_missing_columns")
+            print("ERROR: required columns not found.", file=sys.stderr)
+            return []
 
         rows = []
-        trs = page.locator(f"table:nth-of-type({target_table_idx}) tbody tr")
+        trs = page.locator(f"table:nth-of-type({target_idx}) tbody tr")
         n = await trs.count()
         for i in range(n):
             tds = await trs.nth(i).locator("td").all_inner_texts()
-            if not tds or idx_status is None or idx_order is None or idx_order_detail is None or idx_product is None:
+            if not tds:
                 continue
             status_text = tds[idx_status].strip()
-            if status_text.lower().startswith("new"):  # filter "New"
+            if status_text.lower().startswith("new"):
                 try:
                     order_id = tds[idx_order].strip().split()[0]
                     order_detail_id = tds[idx_order_detail].strip().split()[0]
                 except Exception:
-                    # fallback: use raw text
                     order_id = tds[idx_order].strip()
                     order_detail_id = tds[idx_order_detail].strip()
                 product = tds[idx_product].strip()
@@ -249,6 +301,13 @@ async def fetch_new_orders(cfg) -> List[Dict]:
                     "status": status_text
                 })
 
-        await context.close()
-        await browser.close()
+        # Also dump after parsing (helps debugging)
+        await dump_debug(page, "after_orders_parse")
         return rows
+    finally:
+        try:
+            if page: await page.close()
+            if context: await context.close()
+            if browser: await browser.close()
+        except Exception:
+            pass

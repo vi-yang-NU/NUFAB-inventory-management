@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block body %}
+<h1>NUFAB New Orders (Local)</h1>
+
+<div class="toolbar">
+  <form method="post" action="/import">
+    <button class="btn" type="submit">Import from NUcore (New Orders)</button>
+  </form>
+  <span class="muted">Changes here do <strong>not</strong> update NUcore; this is a local tracker.</span>
+</div>
+
+<table>
+  <thead>
+    <tr>
+      <th style="width: 120px;">Order</th>
+      <th style="width: 140px;">Order Detail</th>
+      <th>Product</th>
+      <th style="width: 220px;">Local Status</th>
+    </tr>
+  </thead>
+  <tbody id="orders-body">
+    {% for row in orders %}
+      {% include "_row.html" %}
+    {% else %}
+      <tr><td colspan="4" class="muted">No orders imported yet. Click “Import from NUcore”.</td></tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

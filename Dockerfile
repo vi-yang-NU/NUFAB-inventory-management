@@ -1,16 +1,17 @@
-# Includes browsers & OS deps; we explicitly install the Python package too.
 FROM mcr.microsoft.com/playwright/python:v1.47.0-jammy
 
 WORKDIR /app
 
-# Ensure the Python package is present in this image
+# Ensure Python deps are available
 RUN python -m pip install --upgrade pip && \
-    pip install --no-cache-dir "playwright==1.47.0"
+    pip install --no-cache-dir "playwright==1.47.0" "flask==3.0.3" "jinja2==3.1.4"
 
 # App code
-COPY main.py /app/main.py
+COPY app.py nucore_client.py /app/
+COPY templates /app/templates
 
-# Output dir for screenshots/logs
-RUN mkdir -p /app/out
+# Artifacts
+RUN mkdir -p /app/out /app/data
 
-CMD ["python", "/app/main.py"]
+EXPOSE 8000
+CMD ["python", "/app/app.py"]

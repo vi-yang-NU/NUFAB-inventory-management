@@ -6,20 +6,13 @@
   "password": "Vinnie@123@4",
 
 
-  "print_mode": "text",
-  "save_screenshot": true,
   "timeout_ms": 30000,
   "headless": true,
   "debug_dump": true,
 
-  "login_success_text": "Signed in successfully.",
+  "wait_for_duo_seconds": 120,
 
   "storage_state_path": "/app/storage_state.json",
   "use_storage_state": false,
-  "persist_storage_state_after_login": true,
-
-  "wait_for_duo_seconds": 120,
-
-  "download_csv": true,
-  "csv_out_path": "/app/out/orders.csv"
+  "persist_storage_state_after_login": true
 }

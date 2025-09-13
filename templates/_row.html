@@ -1,0 +1,19 @@
+<tr id="row-{{ row.key }}">
+  <td><span class="tag">{{ row.order }}</span></td>
+  <td>{{ row.order_detail }}</td>
+  <td>{{ row.product }}</td>
+  <td>
+    <label class="muted" for="status-{{ row.key }}">Mark as:</label>
+    <select id="status-{{ row.key }}"
+            name="status"
+            hx-post="/orders/{{ row.key }}/status"
+            hx-trigger="change"
+            hx-vals='js:{"status": event.target.value}'
+            hx-target="#row-{{ row.key }}"
+            hx-swap="outerHTML">
+      {% for s in statuses %}
+        <option value="{{ s }}" {% if s == row.local_status %}selected{% endif %}>{{ s }}</option>
+      {% endfor %}
+    </select>
+  </td>
+</tr>
